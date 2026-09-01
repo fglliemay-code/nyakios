@@ -1,0 +1,818 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
+<title>MIDI Character Piano</title>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: system-ui, sans-serif;
+  background: #f4f4f4;
+  color: #222;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  padding: 15px 20px;
+  background: white;
+  border-bottom: 1px solid #ddd;
+}
+
+h1 {
+  margin: 0;
+  font-size: 21px;
+}
+
+#stage {
+  position: relative;
+  flex: 1;
+  min-height: 450px;
+  overflow: hidden;
+  background: linear-gradient(#fff, #eaf7ff);
+}
+
+#placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 30px;
+  color: #777;
+  font-size: 21px;
+  font-weight: 600;
+}
+
+/*
+  画像未読込時は絶対に表示しない。
+  謎の枠線生物、ここに眠る。
+*/
+#character {
+  position: absolute;
+
+  width: 190px;
+  height: 190px;
+
+  left: 50%;
+  bottom: 90px;
+
+  object-fit: contain;
+
+  display: none;
+
+  border: none;
+  outline: none;
+
+  transform:
+    translateX(-50%)
+    translateY(0)
+    scale(1);
+
+  transition:
+    transform 80ms linear,
+    filter 80ms linear;
+}
+
+#noteDisplay {
+  position: absolute;
+  left: 20px;
+  bottom: 20px;
+
+  padding: 12px 16px;
+
+  background: rgba(0,0,0,.82);
+  color: #91ff91;
+
+  border-radius: 10px;
+
+  font-family: monospace;
+  font-size: 16px;
+}
+
+#controls {
+  padding: 15px;
+
+  background: white;
+  border-top: 1px solid #ddd;
+
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+button,
+.fileButton {
+  border: none;
+  border-radius: 9px;
+
+  padding: 11px 15px;
+
+  background: #333;
+  color: white;
+
+  font: inherit;
+
+  cursor: pointer;
+}
+
+button:hover,
+.fileButton:hover {
+  background: #555;
+}
+
+button:disabled {
+  opacity: .4;
+  cursor: default;
+}
+
+input[type=file] {
+  display: none;
+}
+
+#status {
+  margin-left: auto;
+  color: #666;
+  font-size: 14px;
+}
+
+/* アライグマ非常事態 */
+.raccoonEmergency {
+  color: #d32f2f !important;
+  font-size: 28px !important;
+  animation: raccoonShake .08s infinite alternate;
+}
+
+@keyframes raccoonShake {
+  from {
+    transform: translateX(-3px) rotate(-1deg);
+  }
+
+  to {
+    transform: translateX(3px) rotate(1deg);
+  }
+}
+</style>
+
+
+<!-- WebAudioFont -->
+<script
+src="https://surikov.github.io/webaudiofont/npm/dist/WebAudioFontPlayer.js">
+</script>
+
+<!-- ピアノ固定 -->
+<script
+src="https://surikov.github.io/webaudiofontdata/sound/0000_FluidR3_GM_sf2_file.js">
+</script>
+
+</head>
+
+
+<body>
+
+<header>
+  <h1>🎹 MIDI Character Piano</h1>
+</header>
+
+
+<div id="stage">
+
+  <div id="placeholder">
+    キャラクター画像を読み込んでください
+  </div>
+
+  <img
+    id="character"
+    alt=""
+  >
+
+  <div id="noteDisplay">
+    note = --;<br>
+    frequency = -- Hz;
+  </div>
+
+</div>
+
+
+<div id="controls">
+
+  <label class="fileButton">
+    🖼️ キャラを読み込む
+
+    <input
+      id="characterInput"
+      type="file"
+      accept="image/*"
+    >
+  </label>
+
+
+  <label class="fileButton">
+    🎼 MIDIを読み込む
+
+    <input
+      id="midiInput"
+      type="file"
+      accept=".mid,.midi,audio/midi,audio/x-midi"
+    >
+  </label>
+
+
+  <button
+    id="playButton"
+    disabled>
+    ▶ 再生
+  </button>
+
+
+  <button
+    id="stopButton"
+    disabled>
+    ■ 停止
+  </button>
+
+
+  <span id="status">
+    準備中…
+  </span>
+
+</div>
+
+
+<script type="module">
+
+/* =========================
+   MIDI Parser
+========================= */
+
+import { Midi } from
+  "https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/+esm";
+
+
+/* =========================
+   Elements
+========================= */
+
+const characterInput =
+  document.querySelector("#characterInput");
+
+const midiInput =
+  document.querySelector("#midiInput");
+
+const character =
+  document.querySelector("#character");
+
+const placeholder =
+  document.querySelector("#placeholder");
+
+const playButton =
+  document.querySelector("#playButton");
+
+const stopButton =
+  document.querySelector("#stopButton");
+
+const noteDisplay =
+  document.querySelector("#noteDisplay");
+
+const status =
+  document.querySelector("#status");
+
+
+/* =========================
+   Audio
+========================= */
+
+const AudioContextClass =
+  window.AudioContext ||
+  window.webkitAudioContext;
+
+const audioContext =
+  new AudioContextClass();
+
+const player =
+  new WebAudioFontPlayer();
+
+const piano =
+  window._tone_0000_FluidR3_GM_sf2_file;
+
+player.loader.decodeAfterLoading(
+  audioContext,
+  "_tone_0000_FluidR3_GM_sf2_file"
+);
+
+
+/* =========================
+   State
+========================= */
+
+let loadedMidi = null;
+let playing = false;
+let timers = [];
+
+
+/* =========================
+   Character
+========================= */
+
+characterInput.addEventListener(
+  "change",
+  () => {
+
+    const file =
+      characterInput.files[0];
+
+    if (!file) return;
+
+
+    /*
+      前の画像URLを掃除
+    */
+
+    const oldURL =
+      character.dataset.objectUrl;
+
+    if (oldURL) {
+      URL.revokeObjectURL(oldURL);
+    }
+
+
+    /*
+      新しい画像
+    */
+
+    const url =
+      URL.createObjectURL(file);
+
+    character.dataset.objectUrl =
+      url;
+
+
+    /*
+      読込中は隠す
+    */
+
+    character.style.display =
+      "none";
+
+    placeholder.style.display =
+      "grid";
+
+    placeholder.classList.remove(
+      "raccoonEmergency"
+    );
+
+    placeholder.textContent =
+      "画像を読み込み中…";
+
+
+    /*
+      成功
+    */
+
+    character.onload = () => {
+
+      character.style.display =
+        "block";
+
+      placeholder.style.display =
+        "none";
+
+      placeholder.classList.remove(
+        "raccoonEmergency"
+      );
+
+      status.textContent =
+        "🖼️ キャラクター読み込み完了";
+
+    };
+
+
+    /*
+      失敗
+    */
+
+    character.onerror = () => {
+
+      character.style.display =
+        "none";
+
+      placeholder.style.display =
+        "grid";
+
+      placeholder.classList.add(
+        "raccoonEmergency"
+      );
+
+      placeholder.textContent =
+        "🦝 断固たるアライグマ：\n" +
+        "キイイイイイイイ！！！";
+
+      status.textContent =
+        "❌ キャラクター画像の読み込みに失敗";
+
+    };
+
+
+    character.src = url;
+
+  }
+);
+
+
+/* =========================
+   MIDI Loader
+========================= */
+
+midiInput.addEventListener(
+  "change",
+  async () => {
+
+    const file =
+      midiInput.files[0];
+
+    if (!file) return;
+
+    try {
+
+      status.textContent =
+        "🎼 MIDI解析中…";
+
+      const buffer =
+        await file.arrayBuffer();
+
+      loadedMidi =
+        new Midi(buffer);
+
+      const noteCount =
+        loadedMidi.tracks.reduce(
+          (total, track) =>
+            total +
+            track.notes.length,
+          0
+        );
+
+      playButton.disabled =
+        false;
+
+      status.textContent =
+        `🎼 ${file.name} / ` +
+        `${noteCount} notes`;
+
+      console.log(
+        "MIDI読み込み完了:",
+        loadedMidi
+      );
+
+    }
+
+    catch (error) {
+
+      console.error(error);
+
+      loadedMidi =
+        null;
+
+      playButton.disabled =
+        true;
+
+      status.textContent =
+        "❌ MIDI解析失敗";
+
+    }
+
+  }
+);
+
+
+/* =========================
+   Helpers
+========================= */
+
+function midiToHz(note) {
+
+  return 440 *
+    Math.pow(
+      2,
+      (note - 69) / 12
+    );
+
+}
+
+
+function showNote(note) {
+
+  const hz =
+    midiToHz(note.midi);
+
+  noteDisplay.innerHTML =
+    `note = ${note.name};<br>` +
+    `frequency = ` +
+    `${hz.toFixed(2)} Hz;`;
+
+}
+
+
+function animateCharacter(note) {
+
+  if (
+    character.style.display
+    !== "block"
+  ) {
+    return;
+  }
+
+
+  /*
+    高い音ほど上へ
+  */
+
+  const difference =
+    note.midi - 60;
+
+  const y =
+    Math.max(
+      -190,
+      Math.min(
+        100,
+        -difference * 5
+      )
+    );
+
+
+  /*
+    Velocityでちょっと膨らむ
+  */
+
+  const scale =
+    1 +
+    note.velocity * .15;
+
+
+  character.style.transform =
+    `translateX(-50%) ` +
+    `translateY(${y}px) ` +
+    `scale(${scale})`;
+
+
+  character.style.filter =
+    `brightness(${
+      1 + note.velocity * .3
+    })`;
+
+}
+
+
+/* =========================
+   Play
+========================= */
+
+async function playMidi() {
+
+  if (!loadedMidi) {
+    return;
+  }
+
+  stopMidi();
+
+  await audioContext.resume();
+
+  playing =
+    true;
+
+  playButton.disabled =
+    true;
+
+  stopButton.disabled =
+    false;
+
+  status.textContent =
+    "▶ 再生中";
+
+
+  const start =
+    audioContext.currentTime +
+    .15;
+
+
+  /*
+    全トラックのノートを統合
+
+    Program Change？
+    知りません。
+
+    全部ピアノです。
+  */
+
+  const notes =
+    loadedMidi.tracks
+      .flatMap(
+        track =>
+          track.notes
+      )
+      .sort(
+        (a, b) =>
+          a.time - b.time
+      );
+
+
+  for (const note of notes) {
+
+
+    /*
+      SoundFont
+    */
+
+    player.queueWaveTable(
+
+      audioContext,
+
+      audioContext.destination,
+
+      piano,
+
+      start + note.time,
+
+      note.midi,
+
+      Math.max(
+        .03,
+        note.duration
+      ),
+
+      Math.max(
+        .05,
+        note.velocity
+      )
+
+    );
+
+
+    /*
+      キャラ表示
+    */
+
+    const timer =
+      setTimeout(
+        () => {
+
+          if (!playing) {
+            return;
+          }
+
+          showNote(note);
+
+          animateCharacter(note);
+
+        },
+
+        note.time * 1000
+      );
+
+    timers.push(timer);
+
+  }
+
+
+  /*
+    曲終了
+  */
+
+  const endTimer =
+    setTimeout(
+      () => {
+
+        if (!playing) {
+          return;
+        }
+
+        playing =
+          false;
+
+        playButton.disabled =
+          false;
+
+        stopButton.disabled =
+          true;
+
+        status.textContent =
+          "✓ 再生終了";
+
+
+        character.style.transform =
+          "translateX(-50%) " +
+          "translateY(0) " +
+          "scale(1)";
+
+        character.style.filter =
+          "none";
+
+      },
+
+      loadedMidi.duration *
+      1000 +
+      250
+    );
+
+  timers.push(
+    endTimer
+  );
+
+}
+
+
+/* =========================
+   Stop
+========================= */
+
+function stopMidi() {
+
+  playing =
+    false;
+
+
+  for (
+    const timer
+    of timers
+  ) {
+
+    clearTimeout(
+      timer
+    );
+
+  }
+
+
+  timers = [];
+
+
+  player.cancelQueue(
+    audioContext
+  );
+
+
+  playButton.disabled =
+    !loadedMidi;
+
+  stopButton.disabled =
+    true;
+
+
+  noteDisplay.innerHTML =
+    "note = --;<br>" +
+    "frequency = -- Hz;";
+
+
+  character.style.transform =
+    "translateX(-50%) " +
+    "translateY(0) " +
+    "scale(1)";
+
+  character.style.filter =
+    "none";
+
+}
+
+
+/* =========================
+   Buttons
+========================= */
+
+playButton.addEventListener(
+  "click",
+  playMidi
+);
+
+
+stopButton.addEventListener(
+  "click",
+  () => {
+
+    stopMidi();
+
+    status.textContent =
+      "■ 停止";
+
+  }
+);
+
+
+/* =========================
+   Ready
+========================= */
+
+status.textContent =
+  "MIDIとキャラクターを読み込んでください";
+
+</script>
+
+</body>
+</html>
