@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>PetWorld HTML</title>
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#11151a; --panel:#1a2129; --panel2:#232d37; --text:#f5f7fa; --muted:#aab7c4;
+  --accent:#7cc7ff; --danger:#ff7a8b; --line:#334252;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{min-height:100vh;display:flex;flex-direction:column;overflow:hidden}
+header{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px;background:var(--panel);border-bottom:1px solid var(--line)}
+button,.filebtn{
+  min-height:42px;border:1px solid var(--line);background:var(--panel2);color:var(--text);
+  border-radius:12px;padding:8px 12px;font-size:15px;font-weight:700;cursor:pointer;
+}
+button:hover,.filebtn:hover{filter:brightness(1.08)}
+button:active,.filebtn:active{transform:translateY(1px)}
+button.primary,.filebtn.primary{background:var(--accent);color:#082033;border-color:transparent}
+button.danger{background:#3a2026;color:#ffd6dc;border-color:#66313d}
+.filebtn input{display:none}
+#status{font-size:13px;color:var(--muted);margin-left:auto;min-width:160px;text-align:right}
+main{position:relative;flex:1;min-height:0;background:
+linear-gradient(#17212b 0 72%,#202a34 72% 100%)}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+#help{
+  position:absolute;left:10px;top:10px;max-width:min(390px,calc(100% - 20px));
+  background:rgba(10,14,18,.78);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.12);
+  border-radius:14px;padding:10px 12px;font-size:13px;line-height:1.55;color:#dce7f1;pointer-events:none
+}
+#help b{color:white}
+#badge{
+  position:absolute;right:10px;bottom:10px;background:rgba(10,14,18,.72);border:1px solid rgba(255,255,255,.12);
+  border-radius:999px;padding:7px 10px;font-size:12px;color:#dce7f1;pointer-events:none
+}
+@media (max-width:760px){
+  header{padding:8px}
+  button,.filebtn{font-size:14px;padding:7px 10px}
+  #status{width:100%;text-align:left;margin-left:0}
+  #help{font-size:12px}
+}
+</style>
+</head>
+<body>
+<header>
+  <label class="filebtn primary">📷 キャラ選択
+    <input id="petFile" type="file" accept="image/*">
+  </label>
+  <label class="filebtn">📦 オブジェクト追加
+    <input id="objFile" type="file" accept="image/*" multiple>
+  </label>
+  <button id="editBtn">🛠️ 編集: OFF</button>
+  <button id="jumpBtn">🦘 ジャンプ</button>
+  <button id="autoBtn">🚶 自動歩行: ON</button>
+  <button id="saveBtn">💾 保存</button>
+  <button id="smallerBtn">➖ 小さく</button>
+  <button id="biggerBtn">➕ 大きく</button>
+  <button id="deleteBtn" class="danger">🗑️ 選択削除</button>
+  <button id="clearBtn" class="danger">💥 世界リセット</button>
+  <div id="status">準備完了</div>
+</header>
+
+<main id="stage">
+  <canvas id="game"></canvas>
+  <div id="help">
+    <b>操作</b><br>
+    ← → / A D：歩く　Space：ジャンプ　E：編集切替　T：自動歩行<br>
+    キャラはドラッグで持ち上げ、離すと落下。編集ONではオブジェクトをドラッグ可能。<br>
+    透過PNG/WebPは透明部分を無視して、足元の不透明ピクセルを「地形」として使います 🪜
+  </div>
+  <div id="badge">PetWorld HTML • IndexedDB保存</div>
+</main>
+
+<script>
+(() => {
+'use strict';
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha:true });
+const stage = document.getElementById('stage');
+const statusEl = document.getElementById('status');
+
+const petFile = document.getElementById('petFile');
+const objFile = document.getElementById('objFile');
+const editBtn = document.getElementById('editBtn');
+const jumpBtn = document.getElementById('jumpBtn');
+const autoBtn = document.getElementById('autoBtn');
+const saveBtn = document.getElementById('saveBtn');
+const smallerBtn = document.getElementById('smallerBtn');
+const biggerBtn = document.getElementById('biggerBtn');
+const deleteBtn = document.getElementById('deleteBtn');
+const clearBtn = document.getElementById('clearBtn');
+
+const world = {
+  pet:null,
+  objects:[],
+  edit:false,
+  autoWalk:true,
+  selected:null,
+  keys:new Set(),
+  gravity:1800,
+  floorPad:6,
+  time:0,
+  last:performance.now(),
+  pointer:null
+};
+
+function say(s){ statusEl.textContent=s; }
+
+function fitCanvas(){
+  const r = stage.getBoundingClientRect();
+  const dpr = Math.max(1, Math.min(2, devicePixelRatio || 1));
+  canvas.width = Math.max(1, Math.floor(r.width*dpr));
+  canvas.height = Math.max(1, Math.floor(r.height*dpr));
+  canvas.style.width = r.width+'px';
+  canvas.style.height = r.height+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
+
+function stageSize(){
+  const r = stage.getBoundingClientRect();
+  return {w:r.width,h:r.height};
+}
+
+function imageFromFile(file){
+  return new Promise((resolve,reject)=>{
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload=()=>{ URL.revokeObjectURL(url); resolve(img); };
+    img.onerror=e=>{ URL.revokeObjectURL(url); reject(e); };
+    img.src=url;
+  });
+}
+
+function fileToDataURL(file){
+  return new Promise((resolve,reject)=>{
+    const fr=new FileReader();
+    fr.onload=()=>resolve(fr.result);
+    fr.onerror=reject;
+    fr.readAsDataURL(file);
+  });
+}
+
+function loadDataURL(url){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>resolve(img);
+    img.onerror=reject;
+    img.src=url;
+  });
+}
+
+function makeMask(img){
+  const c=document.createElement('canvas');
+  c.width=Math.max(1,img.naturalWidth||img.width);
+  c.height=Math.max(1,img.naturalHeight||img.height);
+  const x=c.getContext('2d',{willReadFrequently:true});
+  x.clearRect(0,0,c.width,c.height);
+  x.drawImage(img,0,0,c.width,c.height);
+  const data=x.getImageData(0,0,c.width,c.height).data;
+  return {w:c.width,h:c.height,data};
+}
+
+function autoSize(img,max=150){
+  const iw=img.naturalWidth||img.width||1, ih=img.naturalHeight||img.height||1;
+  const k=Math.min(max/iw,max/ih,1);
+  return {w:Math.max(32,iw*k), h:Math.max(32,ih*k)};
+}
+
+function alphaAt(entity, worldX, worldY){
+  if(!entity || !entity.mask) return 0;
+  const left=entity.x-entity.w/2, top=entity.y-entity.h/2;
+  if(worldX<left || worldX>left+entity.w || worldY<top || worldY>top+entity.h) return 0;
+
+  let u=(worldX-left)/entity.w;
+  if(entity.flipX) u=1-u;
+  const v=(worldY-top)/entity.h;
+  const px=Math.max(0,Math.min(entity.mask.w-1,Math.floor(u*entity.mask.w)));
+  const py=Math.max(0,Math.min(entity.mask.h-1,Math.floor(v*entity.mask.h)));
+  return entity.mask.data[(py*entity.mask.w+px)*4+3];
+}
+
+function entityHit(entity,x,y){
+  return alphaAt(entity,x,y)>20;
+}
+
+function topSurfaceYAt(obj, x){
+  const left=obj.x-obj.w/2;
+  if(x<left || x>left+obj.w) return null;
+  const step=Math.max(1,obj.h/Math.max(20,obj.mask.h));
+  const top=obj.y-obj.h/2;
+  const bottom=obj.y+obj.h/2;
+  for(let y=top;y<=bottom;y+=step){
+    if(alphaAt(obj,x,y)>20) return y;
+  }
+  return null;
+}
+
+function bodyWidth(p){ return p ? p.w*0.46 : 0; }
+function bodyHeight(p){ return p ? p.h*0.84 : 0; }
+
+function findGround(p, prevBottom, nextBottom){
+  const {h}=stageSize();
+  let best=h-world.floorPad;
+  for(const obj of world.objects){
+    const hw=bodyWidth(p)/2;
+    const probes=[p.x-hw*0.7,p.x,p.x+hw*0.7];
+    for(const px of probes){
+      const sy=topSurfaceYAt(obj,px);
+      if(sy==null) continue;
+      if(prevBottom<=sy+10 && nextBottom>=sy-2 && sy<best) best=sy;
+    }
+  }
+  return best;
+}
+
+function collidesHorizontally(p,nextX){
+  const hh=bodyHeight(p)*0.38;
+  const direction=Math.sign(nextX-p.x)||1;
+  const edgeX=nextX + direction*bodyWidth(p)/2;
+  const ys=[p.y-hh,p.y,p.y+hh];
+  for(const obj of world.objects){
+    for(const yy of ys){
+      if(alphaAt(obj,edgeX,yy)>25) return true;
+    }
+  }
+  return false;
+}
+
+function clampPet(){
+  if(!world.pet) return;
+  const {w,h}=stageSize(), p=world.pet;
+  p.x=Math.max(p.w/2,Math.min(w-p.w/2,p.x));
+  p.y=Math.max(p.h/2,Math.min(h-p.h/2,p.y));
+}
+
+function newId(){ return (crypto.randomUUID ? crypto.randomUUID() : Date.now()+'-'+Math.random()); }
+
+async function setPetFromFile(file){
+  if(!file) return;
+  try{
+    const [img,dataURL]=await Promise.all([imageFromFile(file),fileToDataURL(file)]);
+    const s=autoSize(img,140), {w,h}=stageSize();
+    world.pet={
+      id:'pet',type:'pet',img,mask:makeMask(img),dataURL,
+      x:w/2,y:Math.max(90,h/2),w:s.w,h:s.h,vx:0,vy:0,
+      dir:1,onGround:false,dragging:false,flipX:false
+    };
+    world.selected=world.pet;
+    say('キャラクター召喚！ 🐾');
+  }catch(e){ say('画像を読み込めませんでした'); console.error(e); }
+}
+
+async function addObjectFromFile(file,offset=0){
+  try{
+    const [img,dataURL]=await Promise.all([imageFromFile(file),fileToDataURL(file)]);
+    const s=autoSize(img,190), {w,h}=stageSize();
+    const obj={
+      id:newId(),type:'object',img,mask:makeMask(img),dataURL,
+      x:w/2+offset,y:Math.min(h-80,h/2+offset*.2),w:s.w,h:s.h,
+      flipX:false
+    };
+    world.objects.push(obj);
+    world.selected=obj;
+    say('オブジェクト追加 📦');
+  }catch(e){ say('オブジェクトを読み込めませんでした'); console.error(e); }
+}
+
+petFile.addEventListener('change',()=>setPetFromFile(petFile.files[0]));
+objFile.addEventListener('change',async()=>{
+  const files=[...objFile.files];
+  for(let i=0;i<files.length;i++) await addObjectFromFile(files[i],i*22);
+  objFile.value='';
+});
+
+function toggleEdit(){
+  world.edit=!world.edit;
+  editBtn.textContent='🛠️ 編集: '+(world.edit?'ON':'OFF');
+  say(world.edit?'編集モード ON':'編集モード OFF');
+}
+editBtn.addEventListener('click',toggleEdit);
+
+function jump(){
+  const p=world.pet;
+  if(!p) return;
+  if(p.onGround || Math.abs(p.vy)<50){
+    p.vy=-650;
+    p.onGround=false;
+    say('ジャンプ！ 🦘');
+  }
+}
+jumpBtn.addEventListener('click',jump);
+
+autoBtn.addEventListener('click',()=>{
+  world.autoWalk=!world.autoWalk;
+  autoBtn.textContent='🚶 自動歩行: '+(world.autoWalk?'ON':'OFF');
+});
+
+function scaleSelected(f){
+  const e=world.selected;
+  if(!e) return;
+  const nw=Math.max(24,Math.min(700,e.w*f));
+  const nh=Math.max(24,Math.min(700,e.h*f));
+  e.w=nw;e.h=nh;
+}
+smallerBtn.addEventListener('click',()=>scaleSelected(.9));
+biggerBtn.addEventListener('click',()=>scaleSelected(1.1));
+
+deleteBtn.addEventListener('click',()=>{
+  if(!world.selected) return;
+  if(world.selected.type==='pet'){
+    world.pet=null;
+  }else{
+    world.objects=world.objects.filter(o=>o!==world.selected);
+  }
+  world.selected=null;
+  say('削除しました 🗑️');
+});
+
+function pointerPos(ev){
+  const r=canvas.getBoundingClientRect();
+  return {x:ev.clientX-r.left,y:ev.clientY-r.top};
+}
+
+function pickEntity(x,y){
+  if(world.edit){
+    for(let i=world.objects.length-1;i>=0;i--){
+      if(entityHit(world.objects[i],x,y)) return world.objects[i];
+    }
+  }
+  if(world.pet && entityHit(world.pet,x,y)) return world.pet;
+  return null;
+}
+
+canvas.addEventListener('pointerdown',ev=>{
+  canvas.setPointerCapture(ev.pointerId);
+  const p=pointerPos(ev);
+  const e=pickEntity(p.x,p.y);
+  if(!e) return;
+  world.selected=e;
+  world.pointer={id:ev.pointerId,entity:e,dx:e.x-p.x,dy:e.y-p.y};
+  if(e.type==='pet'){
+    e.dragging=true;e.vx=0;e.vy=0;
+  }
+});
+
+canvas.addEventListener('pointermove',ev=>{
+  if(!world.pointer || world.pointer.id!==ev.pointerId) return;
+  const p=pointerPos(ev), e=world.pointer.entity;
+  e.x=p.x+world.pointer.dx;
+  e.y=p.y+world.pointer.dy;
+});
+
+function endPointer(ev){
+  if(!world.pointer || world.pointer.id!==ev.pointerId) return;
+  const e=world.pointer.entity;
+  if(e.type==='pet') e.dragging=false;
+  world.pointer=null;
+}
+canvas.addEventListener('pointerup',endPointer);
+canvas.addEventListener('pointercancel',endPointer);
+
+canvas.addEventListener('wheel',ev=>{
+  if(!world.edit || !world.selected) return;
+  ev.preventDefault();
+  scaleSelected(ev.deltaY<0?1.06:.94);
+},{passive:false});
+
+window.addEventListener('keydown',ev=>{
+  if(['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) return;
+  world.keys.add(ev.key.toLowerCase());
+  if(ev.code==='Space'){ ev.preventDefault(); jump(); }
+  if(ev.key.toLowerCase()==='e') toggleEdit();
+  if(ev.key.toLowerCase()==='t'){
+    world.autoWalk=!world.autoWalk;
+    autoBtn.textContent='🚶 自動歩行: '+(world.autoWalk?'ON':'OFF');
+  }
+  if((ev.ctrlKey||ev.metaKey) && ev.key.toLowerCase()==='s'){ ev.preventDefault(); saveWorld(); }
+});
+window.addEventListener('keyup',ev=>world.keys.delete(ev.key.toLowerCase()));
+
+function update(dt){
+  world.time+=dt;
+  const p=world.pet;
+  if(!p || p.dragging) return;
+
+  const left=world.keys.has('arrowleft')||world.keys.has('a');
+  const right=world.keys.has('arrowright')||world.keys.has('d');
+
+  let desired=0;
+  if(left&&!right) desired=-1;
+  if(right&&!left) desired=1;
+  if(desired===0 && world.autoWalk) desired=p.dir;
+
+  const speed=120;
+  const nextX=p.x+desired*speed*dt;
+
+  if(desired!==0){
+    if(collidesHorizontally(p,nextX)){
+      if(world.autoWalk && !left && !right) p.dir*=-1;
+      p.vx=0;
+    }else{
+      p.vx=desired*speed;
+      p.x=nextX;
+      p.dir=desired;
+      p.flipX=desired<0;
+    }
+  }else p.vx=0;
+
+  const {w,h}=stageSize();
+  if(p.x< p.w/2){ p.x=p.w/2; p.dir=1; }
+  if(p.x> w-p.w/2){ p.x=w-p.w/2; p.dir=-1; }
+
+  const prevBottom=p.y+bodyHeight(p)/2;
+  p.vy+=world.gravity*dt;
+  let nextY=p.y+p.vy*dt;
+  const nextBottom=nextY+bodyHeight(p)/2;
+  const ground=findGround(p,prevBottom,nextBottom);
+
+  if(p.vy>=0 && nextBottom>=ground){
+    nextY=ground-bodyHeight(p)/2;
+    p.vy=0;
+    p.onGround=true;
+  }else{
+    p.onGround=false;
+  }
+  p.y=nextY;
+
+  if(p.y>h+300){
+    p.x=w/2;p.y=50;p.vx=0;p.vy=0;
+  }
+  clampPet();
+}
+
+function drawEntity(e,selected=false){
+  ctx.save();
+  ctx.translate(e.x,e.y);
+  const wobble=(e.type==='pet' && !e.dragging && Math.abs(e.vx)>1)?Math.sin(world.time*12)*0.035:0;
+  ctx.rotate(wobble);
+  ctx.scale(e.flipX?-1:1,1);
+  ctx.drawImage(e.img,-e.w/2,-e.h/2,e.w,e.h);
+  ctx.restore();
+
+  if(selected){
+    ctx.save();
+    ctx.strokeStyle='#7cc7ff';
+    ctx.lineWidth=2;
+    ctx.setLineDash([7,5]);
+    ctx.strokeRect(e.x-e.w/2,e.y-e.h/2,e.w,e.h);
+    ctx.restore();
+  }
+}
+
+function draw(){
+  const {w,h}=stageSize();
+  ctx.clearRect(0,0,w,h);
+
+  ctx.save();
+  ctx.strokeStyle='rgba(255,255,255,.12)';
+  ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(0,h-world.floorPad); ctx.lineTo(w,h-world.floorPad); ctx.stroke();
+  ctx.restore();
+
+  for(const o of world.objects) drawEntity(o,world.selected===o);
+  if(world.pet) drawEntity(world.pet,world.selected===world.pet);
+}
+
+function frame(now){
+  const dt=Math.min(.033,(now-world.last)/1000||0);
+  world.last=now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---- IndexedDB ----
+const DB='petworld-html-db', STORE='world';
+function openDB(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(DB,1);
+    req.onupgradeneeded=()=>req.result.createObjectStore(STORE);
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbPut(key,val){
+  const db=await openDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(STORE,'readwrite');
+    tx.objectStore(STORE).put(val,key);
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function dbGet(key){
+  const db=await openDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(STORE,'readonly');
+    const req=tx.objectStore(STORE).get(key);
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function dbClear(){
+  const db=await openDB();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction(STORE,'readwrite');
+    tx.objectStore(STORE).clear();
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+
+function serialiseEntity(e){
+  if(!e) return null;
+  return {
+    id:e.id,type:e.type,dataURL:e.dataURL,x:e.x,y:e.y,w:e.w,h:e.h,
+    dir:e.dir||1,flipX:!!e.flipX
+  };
+}
+
+async function saveWorld(){
+  const payload={
+    pet:serialiseEntity(world.pet),
+    objects:world.objects.map(serialiseEntity),
+    autoWalk:world.autoWalk
+  };
+  await dbPut('state',payload);
+  say('世界を保存しました 💾');
+}
+saveBtn.addEventListener('click',()=>saveWorld().catch(e=>{console.error(e);say('保存に失敗しました');}));
+
+async function reviveEntity(s){
+  const img=await loadDataURL(s.dataURL);
+  return {
+    ...s,img,mask:makeMask(img),vx:0,vy:0,onGround:false,dragging:false
+  };
+}
+
+async function restoreWorld(){
+  try{
+    const s=await dbGet('state');
+    if(!s) return;
+    world.objects=[];
+    for(const o of s.objects||[]) world.objects.push(await reviveEntity(o));
+    world.pet=s.pet?await reviveEntity(s.pet):null;
+    world.autoWalk=s.autoWalk!==false;
+    autoBtn.textContent='🚶 自動歩行: '+(world.autoWalk?'ON':'OFF');
+    say('保存された世界を復元しました ✨');
+  }catch(e){ console.error(e); say('復元できませんでした'); }
+}
+
+clearBtn.addEventListener('click',async()=>{
+  if(!confirm('保存データと現在の世界を全部消しますか？')) return;
+  world.pet=null;world.objects=[];world.selected=null;
+  await dbClear();
+  say('世界をリセットしました 💥');
+});
+
+restoreWorld();
+})();
+</script>
+</body>
+</html>
